@@ -153,7 +153,12 @@
     <button id="zoom100Btn">100%</button>
   </div>
 
-  <div class="group" style="margin-left:auto" title="画像全体にトーン圧縮をかけ、隠し部分の明るさクリップ(=クリック後の継ぎ目)を無くします。全体が少し暗くなります">
+  <div class="group" style="margin-left:auto" title="クリック後の復元をどちらの環境に合わせるか。Xモバイルアプリはリニア色空間で描画するため、PCブラウザより隠し部分が約1.46倍明るく表示されます。両立は原理上不可能なので基準を選びます">
+    <span class="label">クリック後の基準</span>
+    <button id="targetPC" class="active">PC</button>
+    <button id="targetMobile">モバイル</button>
+  </div>
+  <div class="group" title="画像全体にトーン圧縮をかけ、隠し部分の明るさクリップ(=クリック後の継ぎ目)を無くします。全体が少し暗くなります">
     <label class="label" style="cursor:pointer; user-select:none">
       <input type="checkbox" id="photoMode"> 写真モード(クリップ回避)
     </label>
@@ -195,6 +200,7 @@
     <li>X が確実に PNG のまま保持する PNG-8 (256色) で書き出します</li>
     <li>明るい色(RGBが128以上)の隠し部分は、開いたとき本来より暗くなります。暗めのイラストに向いた手法です</li>
     <li>写真など明るい画像では「写真モード」をONにすると、全体を暗めに圧縮する代わりに、クリック後の明るさの継ぎ目が無くなります</li>
+    <li>PCブラウザとXモバイルアプリでは隠し部分の復元明るさが約1.46倍異なります(描画方式の違い)。両立はできないため「クリック後の基準」で合わせる環境を選んでください</li>
     <li>見せる部分の輪郭には白っぽいフチが出ます(実際に流行している画像と同じ現象です)</li>
   </ul>
 </div>
@@ -220,6 +226,7 @@ let thumbBg = "#ffffff";
 let tool = "brush";        // brush | erase
 let brushSize = 80;
 let photoMode = false;     // 全体トーン圧縮でクリップ回避
+let clickTarget = "pc";    // クリック後の復元基準 pc | mobile
 
 // ビュー変換 (画像座標 -> 画面CSS座標)
 let scale = 1, tx = 0, ty = 0;
@@ -547,6 +554,18 @@ function setBrushSize(v) {
   requestRender();
 }
 $("sizeRange").oninput = (e) => setBrushSize(+e.target.value);
+for (const [id, target] of [["targetPC", "pc"], ["targetMobile", "mobile"]]) {
+  $(id).onclick = async () => {
+    clickTarget = target;
+    $("targetPC").classList.toggle("active", target === "pc");
+    $("targetMobile").classList.toggle("active", target === "mobile");
+    processedDirty = true;
+    if (mode !== "edit" && img) { await ensureProcessed(); requestRender(); }
+    status(target === "mobile"
+      ? "モバイル基準: Xアプリで正確に復元。PCブラウザでは隠し部分が約3割暗く見えます(「クリック後」プレビューはPC相当の見え方)"
+      : "PC基準: PCブラウザで正確に復元。Xモバイルアプリでは隠し部分が約1.4倍明るく見えます");
+  };
+}
 $("photoMode").onchange = async (e) => {
   photoMode = e.target.checked;
   processedDirty = true;
@@ -611,14 +630,17 @@ function processTrick(srcData, maskData, w, h) {
       const r = s[i], g = s[i + 1], b = s[i + 2], a = s[i + 3];
       const vis = m[i + 3] / 255; // 1=見せる
       if (a === 0) continue; // 元から透明
-      const pHidden = 0.5;
+      const pHidden = 0.5; // 透過率(サムネで消える性質)は基準によらず常に50%
+      // 隠し部分の色倍率: PCブラウザはsRGB空間で市松を平均するので2.0、
+      // Xモバイルアプリはリニア色空間で平均するため 2^(1/2.2)≈1.37 でちょうど元の色に戻る
+      const gainInv = clickTarget === "mobile" ? 0.7297 : 0.5;
       const p = (vis + (1 - vis) * pHidden) * (a / 255);
       if (p >= 0.998) {
         o[i] = r; o[i + 1] = g; o[i + 2] = b; o[i + 3] = 255;
       } else {
         const thr = (BAYER4[by + (x & 3)] + 0.5) / 16;
         if (p > thr) {
-          let k = 1 / (vis + (1 - vis) * pHidden);
+          let k = 1 / (vis + (1 - vis) * gainInv);
           // 色相保持クリップ: チャンネル個別に255で切ると白っぽく濁るため、
           // はみ出す場合はピクセル全体の倍率を下げて色味を保つ
           const maxc = Math.max(r, g, b);
