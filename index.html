@@ -153,12 +153,12 @@
     <button id="zoom100Btn">100%</button>
   </div>
 
-  <div class="group" style="margin-left:auto" title="クリック後の復元をどちらの環境に合わせるか。Xモバイルアプリはリニア色空間で描画するため、PCブラウザより隠し部分が約1.46倍明るく表示されます。両立は原理上不可能なので基準を選びます">
+  <div class="group" style="margin-left:auto" title="クリック後の復元をどちらの環境に合わせるか。Xモバイルアプリは拡大表示で隠し部分がPCの2倍の明るさで表示されるため(実測)、両立できず基準を選びます。サムネの隠れ方はどちらも同じです">
     <span class="label">クリック後の基準</span>
     <button id="targetPC" class="active">PC</button>
     <button id="targetMobile">モバイル</button>
   </div>
-  <div class="group" title="画像全体にトーン圧縮をかけ、隠し部分の明るさクリップ(=クリック後の継ぎ目)を無くします。全体が少し暗くなります">
+  <div class="group" id="photoModeGroup" title="PC基準専用: 画像全体にトーン圧縮をかけ、隠し部分の明るさクリップ(=クリック後の継ぎ目)を無くします。全体が少し暗くなります。モバイル基準はクリップ自体が無いため不要です">
     <label class="label" style="cursor:pointer; user-select:none">
       <input type="checkbox" id="photoMode"> 写真モード(クリップ回避)
     </label>
@@ -198,9 +198,9 @@
     <li>隠し部分は1px市松模様の透過+明度2倍で符号化。クリック後の黒背景で平均されて元の色に復元されます</li>
     <li>X はサムネ生成時に半透明ピクセルを完全透過に落とすため、隠し部分はライト/ダークどちらのテーマでも見えません</li>
     <li>X が確実に PNG のまま保持する PNG-8 (256色) で書き出します</li>
-    <li>明るい色(RGBが128以上)の隠し部分は、開いたとき本来より暗くなります。暗めのイラストに向いた手法です</li>
-    <li>写真など明るい画像では「写真モード」をONにすると、全体を暗めに圧縮する代わりに、クリック後の明るさの継ぎ目が無くなります</li>
-    <li>PCブラウザとXモバイルアプリでは隠し部分の復元明るさが約1.46倍異なります(描画方式の違い)。両立はできないため「クリック後の基準」で合わせる環境を選んでください</li>
+    <li>サムネで確実に隠すには長辺2048px超が必須(それ以下だとXモバイルアプリのサムネで市松が縞状に漏れます。PCは正常)。書き出し時に自動で長辺3072pxに拡大するので意識は不要です</li>
+    <li>クリック後の見え方はPCブラウザ(色÷2)とXモバイルアプリ(色そのまま)で2倍異なり両立できません。「クリック後の基準」で合わせる環境を選んでください</li>
+    <li>PC基準では明るい色(RGB128以上)の隠し部分が頭打ちで暗くなるため、写真では「写真モード」を併用。モバイル基準はクリップ自体が無く写真モード不要です</li>
     <li>見せる部分の輪郭には白っぽいフチが出ます(実際に流行している画像と同じ現象です)</li>
   </ul>
 </div>
@@ -559,11 +559,21 @@ for (const [id, target] of [["targetPC", "pc"], ["targetMobile", "mobile"]]) {
     clickTarget = target;
     $("targetPC").classList.toggle("active", target === "pc");
     $("targetMobile").classList.toggle("active", target === "mobile");
+    // 写真モードはPC基準専用(モバイル基準=倍率1.0はクリップ自体が無い)
+    const pm = $("photoMode");
+    if (target === "mobile") {
+      if (pm.checked) { pm.checked = false; photoMode = false; }
+      pm.disabled = true;
+      $("photoModeGroup").style.opacity = ".45";
+    } else {
+      pm.disabled = false;
+      $("photoModeGroup").style.opacity = "";
+    }
     processedDirty = true;
     if (mode !== "edit" && img) { await ensureProcessed(); requestRender(); }
     status(target === "mobile"
-      ? "モバイル基準: Xアプリで正確に復元。PCブラウザでは隠し部分が約3割暗く見えます(「クリック後」プレビューはPC相当の見え方)"
-      : "PC基準: PCブラウザで正確に復元。Xモバイルアプリでは隠し部分が約1.4倍明るく見えます");
+      ? "モバイル基準: Xアプリのクリック後で完全復元(クリップなし・写真モード不要)。PCでは隠し部分が半分の暗さに見えます(「クリック後」プレビューはPC相当)"
+      : "PC基準: PCブラウザのクリック後で正確に復元。Xモバイルアプリでは隠し部分が2倍明るく見えます");
   };
 }
 $("photoMode").onchange = async (e) => {
@@ -631,9 +641,12 @@ function processTrick(srcData, maskData, w, h) {
       const vis = m[i + 3] / 255; // 1=見せる
       if (a === 0) continue; // 元から透明
       const pHidden = 0.5; // 透過率(サムネで消える性質)は基準によらず常に50%
-      // 隠し部分の色倍率: PCブラウザはsRGB空間で市松を平均するので2.0、
-      // Xモバイルアプリはリニア色空間で平均するため 2^(1/2.2)≈1.37 でちょうど元の色に戻る
-      const gainInv = clickTarget === "mobile" ? 0.7297 : 0.5;
+      // 隠し部分の色倍率(実機キャリブレーションで測定済み):
+      // ・PCブラウザは市松(または2048px超でサーバーが焼き込んだ半透明)を合成して
+      //   「色÷2」で表示するため 2.0倍。2048px以下ならモバイルアプリも同じ。
+      // ・2048px超の画像のみ、モバイルアプリは拡大ビューでアルファを無視して
+      //   不透明描画するため「色がそのまま」出る → 1.0倍(=持ち上げ不要、クリップなし)
+      const gainInv = clickTarget === "mobile" ? 1.0 : 0.5;
       const p = (vis + (1 - vis) * pHidden) * (a / 255);
       if (p >= 0.998) {
         o[i] = r; o[i + 1] = g; o[i + 2] = b; o[i + 3] = 255;
@@ -909,8 +922,14 @@ async function exportPNG() {
   showBusy("トリック加工中…");
   await nextFrame();
   try {
-    const { srcData, maskData } = getSrcAndMask(iw, ih);
-    const out = processTrick(srcData, maskData, iw, ih);
+    // 長辺2048px以下だと、Xモバイルアプリのサムネイルで市松がクライアント
+    // 縮小されて縞状に漏れる(実測。PCのサムネ・クリック後は正常)。
+    // 書き出しは常に長辺2048px超(小さい画像は3072pxへ自動拡大)にする。
+    const maxSide = Math.max(iw, ih);
+    const es = maxSide <= 2048 ? 3072 / maxSide : Math.min(1, 4096 / maxSide);
+    const ew = Math.max(1, Math.round(iw * es)), eh = Math.max(1, Math.round(ih * es));
+    const { srcData, maskData } = getSrcAndMask(ew, eh);
+    const out = processTrick(srcData, maskData, ew, eh);
     let bytes;
     if (typeof CompressionStream !== "undefined") {
       showBusy("PNG-8 に変換中…");
@@ -923,7 +942,7 @@ async function exportPNG() {
       // フォールバック: フルカラーPNG (Xで再変換されるおそれあり)
       alert("このブラウザは CompressionStream 非対応のため、フルカラーPNGで書き出します。\nXでJPEGに変換される可能性があります。");
       const c = document.createElement("canvas");
-      c.width = iw; c.height = ih;
+      c.width = ew; c.height = eh;
       c.getContext("2d").putImageData(out, 0, 0);
       const blob = await new Promise((res) => c.toBlob(res, "image/png"));
       bytes = new Uint8Array(await blob.arrayBuffer());
@@ -934,7 +953,7 @@ async function exportPNG() {
     a.download = `${baseName}_trick.png`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 30000);
-    status(`書き出しました: ${a.download} (${(blob.size / 1024 / 1024).toFixed(2)} MB) — そのままXに投稿できます`);
+    status(`書き出しました: ${a.download} (${ew}×${eh}px, ${(blob.size / 1024 / 1024).toFixed(2)} MB${es > 1 ? ", サムネで確実に隠すため自動拡大済み" : es < 1 ? ", 自動縮小済み" : ""}) — そのままXに投稿できます`);
   } finally {
     hideBusy();
   }
