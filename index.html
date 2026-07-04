@@ -153,7 +153,12 @@
     <button id="zoom100Btn">100%</button>
   </div>
 
-  <button id="exportBtn" class="primary" style="margin-left:auto">PNGを書き出す</button>
+  <div class="group" style="margin-left:auto" title="画像全体にトーン圧縮をかけ、隠し部分の明るさクリップ(=クリック後の継ぎ目)を無くします。全体が少し暗くなります">
+    <label class="label" style="cursor:pointer; user-select:none">
+      <input type="checkbox" id="photoMode"> 写真モード(クリップ回避)
+    </label>
+  </div>
+  <button id="exportBtn" class="primary">PNGを書き出す</button>
 </div>
 
 <div id="stage">
@@ -188,7 +193,8 @@
     <li>隠し部分は1px市松模様の透過+明度2倍で符号化。クリック後の黒背景で平均されて元の色に復元されます</li>
     <li>X はサムネ生成時に半透明ピクセルを完全透過に落とすため、隠し部分はライト/ダークどちらのテーマでも見えません</li>
     <li>X が確実に PNG のまま保持する PNG-8 (256色) で書き出します</li>
-    <li>明るい色(RGBが128以上)の隠し部分は、開いたとき本来より暗く/白っぽくなります。暗めのイラストに向いた手法です</li>
+    <li>明るい色(RGBが128以上)の隠し部分は、開いたとき本来より暗くなります。暗めのイラストに向いた手法です</li>
+    <li>写真など明るい画像では「写真モード」をONにすると、全体を暗めに圧縮する代わりに、クリック後の明るさの継ぎ目が無くなります</li>
     <li>見せる部分の輪郭には白っぽいフチが出ます(実際に流行している画像と同じ現象です)</li>
   </ul>
 </div>
@@ -213,6 +219,7 @@ let mode = "edit";         // edit | thumb | full
 let thumbBg = "#ffffff";
 let tool = "brush";        // brush | erase
 let brushSize = 80;
+let photoMode = false;     // 全体トーン圧縮でクリップ回避
 
 // ビュー変換 (画像座標 -> 画面CSS座標)
 let scale = 1, tx = 0, ty = 0;
@@ -500,7 +507,12 @@ view.addEventListener("wheel", (e) => {
 // ========================= キーボード =========================
 window.addEventListener("keydown", (e) => {
   if (e.target.tagName === "INPUT") return;
-  if (e.code === "Space") { spaceHeld = true; e.preventDefault(); }
+  if (e.code === "Space") {
+    // 万一ボタン類にフォーカスが残っていても Space で再発火させない
+    const ae = document.activeElement;
+    if (ae && ae !== document.body && ae.blur) ae.blur();
+    spaceHeld = true; e.preventDefault();
+  }
   if (e.key === "b" || e.key === "B") setTool("brush");
   if (e.key === "e" || e.key === "E") setTool("erase");
   if (e.key === "i" || e.key === "I") invertMask();
@@ -512,6 +524,13 @@ window.addEventListener("keydown", (e) => {
   }
 });
 window.addEventListener("keyup", (e) => { if (e.code === "Space") spaceHeld = false; });
+
+// ボタンにフォーカスが残ると、パン操作の Space やEnterでそのボタンが
+// 再発火してしまう(反転が勝手に再実行される等)ため、クリックでは
+// フォーカスを与えない。キーボード(Tab)操作のフォーカスは影響しない。
+for (const b of document.querySelectorAll("button")) {
+  b.addEventListener("mousedown", (e) => e.preventDefault());
+}
 
 function setTool(t) {
   tool = t;
@@ -528,6 +547,14 @@ function setBrushSize(v) {
   requestRender();
 }
 $("sizeRange").oninput = (e) => setBrushSize(+e.target.value);
+$("photoMode").onchange = async (e) => {
+  photoMode = e.target.checked;
+  processedDirty = true;
+  if (mode !== "edit" && img) { await ensureProcessed(); requestRender(); }
+  status(photoMode
+    ? "写真モードON: 全体をトーン圧縮し、クリック後の明るさクリップ(継ぎ目)を防ぎます"
+    : "写真モードOFF: 元の明るさのまま。RGB128以上の隠し部分は開いたとき暗くなります");
+};
 
 // ========================= 表示モード =========================
 async function setMode(m) {
@@ -591,10 +618,14 @@ function processTrick(srcData, maskData, w, h) {
       } else {
         const thr = (BAYER4[by + (x & 3)] + 0.5) / 16;
         if (p > thr) {
-          const k = 1 / (vis + (1 - vis) * pHidden);
-          o[i] = Math.min(255, Math.round(r * k));
-          o[i + 1] = Math.min(255, Math.round(g * k));
-          o[i + 2] = Math.min(255, Math.round(b * k));
+          let k = 1 / (vis + (1 - vis) * pHidden);
+          // 色相保持クリップ: チャンネル個別に255で切ると白っぽく濁るため、
+          // はみ出す場合はピクセル全体の倍率を下げて色味を保つ
+          const maxc = Math.max(r, g, b);
+          if (maxc * k > 255) k = 255 / maxc;
+          o[i] = Math.round(r * k);
+          o[i + 1] = Math.round(g * k);
+          o[i + 2] = Math.round(b * k);
           o[i + 3] = 255;
         }
         // else: 透明のまま (0,0,0,0)
@@ -604,12 +635,29 @@ function processTrick(srcData, maskData, w, h) {
   return out;
 }
 
+// 写真モード: Reinhard型トーン圧縮 c' = c / (1 + c/255)。
+// 最大値255がちょうど127.5に写るため、2倍しても一切クリップしない。
+// 画像全体に一様にかけるので、見せる部分と隠し部分の明るさの継ぎ目が出ない。
+const TONE_LUT = (() => {
+  const t = new Uint8Array(256);
+  for (let c = 0; c < 256; c++) t[c] = Math.round(c / (1 + c / 255));
+  return t;
+})();
+
 function getSrcAndMask(w, h) {
   const c = document.createElement("canvas");
   c.width = w; c.height = h;
   const cx = c.getContext("2d", { willReadFrequently: true });
   cx.drawImage(img, 0, 0, w, h);
   const srcData = cx.getImageData(0, 0, w, h);
+  if (photoMode) {
+    const d = srcData.data;
+    for (let i = 0; i < d.length; i += 4) {
+      d[i] = TONE_LUT[d[i]];
+      d[i + 1] = TONE_LUT[d[i + 1]];
+      d[i + 2] = TONE_LUT[d[i + 2]];
+    }
+  }
   cx.clearRect(0, 0, w, h);
   cx.drawImage(maskCanvas, 0, 0, w, h);
   const maskData = cx.getImageData(0, 0, w, h);
