@@ -17,6 +17,9 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      # actions内部の依存ライブラリが出す punycode 非推奨警告(DEP0040)を抑制
+      NODE_OPTIONS: --disable-warning=DEP0040
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
