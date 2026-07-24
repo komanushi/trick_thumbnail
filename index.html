@@ -4,6 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>透過サムネトリックメーカー</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@600&family=Zen+Maru+Gothic:wght@700&display=swap" rel="stylesheet">
 <style>
   :root {
     --bg: #14161a;
@@ -56,6 +59,11 @@
   button.primary:hover { filter: brightness(1.1); }
   button:disabled { opacity: .4; cursor: default; }
   input[type=range] { width: 110px; accent-color: var(--accent); }
+  select {
+    background: var(--panel2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 4px 6px; font-size: 12.5px; font-family: inherit;
+  }
   #stage {
     flex: 1; position: relative; overflow: hidden;
     background:
@@ -155,10 +163,9 @@
 
   <div class="group" id="stampGroup" title="「長押しで見てね」を伝えるスタンプを画像に焼き込みます。TLでも開いたときでも見えます。編集画面でドラッグして位置を調整">
     <span class="label">スタンプ</span>
-    <button id="stampNone" class="active">なし</button>
-    <button id="stamp0">Tap&Hold🥺</button>
-    <button id="stamp1">長押し👆</button>
-    <button id="stamp2">ぜんぶ🫣</button>
+    <select id="stampSel">
+      <option value="-1" selected>なし</option>
+    </select>
     <span class="label">大きさ</span>
     <input type="range" id="stampSize" min="2" max="9" value="4" step="0.5" style="width:70px">
   </div>
@@ -234,11 +241,26 @@ let brushSize = 80;
 let photoMode = false;     // 全体トーン圧縮でクリップ回避
 
 // 「長押しで見てね」スタンプ。完全不透明で焼き込むのでTLでも開いたときでも見える
+// font: en = Fredoka(丸ゴ系ラテン), jp = Zen Maru Gothic。heart: ピル右上に描くハート飾り
 const STAMPS = [
-  { text: "Tap & Hold Please 🥺", bg: "#ffffff", border: "#ff9ec6", fg: "#ff6fa5" },
-  { text: "👆 長押しでみてね", bg: "#ffd9e8", border: "#ffffff", fg: "#d84a7f" },
-  { text: "長押しで全部見えるよ 🫣", bg: "#fff3c4", border: "#ffffff", fg: "#b8860b" },
+  { text: "Tap & Hold Please", font: "en", bg: "#ffffff", border: "#ff9ec6", fg: "#ff6fa5", heart: true },
+  { text: "Hold Me!", font: "en", bg: "#ffb7d5", border: "#ffffff", fg: "#ffffff", heart: true },
+  { text: "Press & Hold", font: "en", bg: "#fff3c4", border: "#ffffff", fg: "#c9942a", heart: false },
+  { text: "Hold for More", font: "en", bg: "#d9f2ef", border: "#ffffff", fg: "#2e9e8f", heart: false },
+  { text: "長押しでみてね", font: "jp", bg: "#ffd9e8", border: "#ffffff", fg: "#d84a7f", heart: true },
+  { text: "長押しで全部見えるよ", font: "jp", bg: "#e3e9ff", border: "#ffffff", fg: "#5a6fd6", heart: false },
 ];
+const STAMP_FONT = {
+  en: (fs) => `600 ${fs}px "Fredoka", "Baloo 2", "Hiragino Maru Gothic ProN", sans-serif`,
+  jp: (fs) => `700 ${fs}px "Zen Maru Gothic", "Hiragino Maru Gothic ProN", "Yu Gothic UI", sans-serif`,
+};
+// Webフォント未ロードのまま焼き込むと代替フォントになるため、描画前に確実に読む
+function ensureStampFont() {
+  return Promise.all([
+    document.fonts.load('600 100px "Fredoka"'),
+    document.fonts.load('700 100px "Zen Maru Gothic"'),
+  ]).catch(() => {});
+}
 let stamp = { idx: -1, x: 0, y: 0, pct: 4, angle: -6 * Math.PI / 180 };
 let stampBox = null;       // 編集ビューでのドラッグ判定用(画像座標のAABB)
 let stampDragging = false, stampDragOff = null;
@@ -417,7 +439,7 @@ function drawStamp(ctx, r) {
   ctx.save();
   ctx.translate(stamp.x * r, stamp.y * r);
   ctx.rotate(stamp.angle);
-  ctx.font = `bold ${fs}px "Hiragino Maru Gothic ProN", "Yu Gothic UI", "Noto Sans JP", sans-serif`;
+  ctx.font = STAMP_FONT[s.font](fs);
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   const tw = ctx.measureText(s.text).width;
@@ -442,6 +464,23 @@ function drawStamp(ctx, r) {
   }
   ctx.fillStyle = s.fg;
   ctx.fillText(s.text, 0, fs * 0.06);
+  if (s.heart) {
+    // ピル右上のハート飾り(フォント任せにせずパスで描く)
+    const hs = fs * 0.42;
+    ctx.save();
+    ctx.translate(pw / 2 - hs * 0.2, -ph / 2 - hs * 0.15);
+    ctx.rotate(0.35);
+    ctx.beginPath();
+    ctx.moveTo(0, hs * 0.35);
+    ctx.bezierCurveTo(-hs, -hs * 0.45, -hs * 0.45, -hs * 1.1, 0, -hs * 0.35);
+    ctx.bezierCurveTo(hs * 0.45, -hs * 1.1, hs, -hs * 0.45, 0, hs * 0.35);
+    ctx.fillStyle = s.border === "#ffffff" ? s.fg : s.border;
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = bw * 0.6;
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
   ctx.restore();
   if (r === 1) {
     // ドラッグ判定用AABB(回転ぶんを対角で概算)
@@ -469,20 +508,25 @@ function bakeStamp(out, w, h, r) {
   }
 }
 
-function setStamp(idx) {
+async function setStamp(idx) {
   stamp.idx = idx;
-  $("stampNone").classList.toggle("active", idx < 0);
-  for (let i = 0; i < STAMPS.length; i++) $(`stamp${i}`).classList.toggle("active", idx === i);
+  $("stampSel").value = String(idx);
   if (idx >= 0 && img && stamp.x === 0 && stamp.y === 0) {
     stamp.x = iw * 0.5; stamp.y = ih * 0.85; // 初期位置は下中央
   }
+  if (idx >= 0) await ensureStampFont();
   processedDirty = true;
-  if (mode !== "edit" && img) { ensureProcessed().then(requestRender); }
+  if (mode !== "edit" && img) { await ensureProcessed(); }
   status(idx < 0 ? "スタンプなし" : `スタンプ「${STAMPS[idx].text}」: 編集画面でドラッグして位置を調整できます`);
   requestRender();
 }
-$("stampNone").onclick = () => setStamp(-1);
-for (let i = 0; i < STAMPS.length; i++) $(`stamp${i}`).onclick = () => setStamp(i);
+for (let i = 0; i < STAMPS.length; i++) {
+  const o = document.createElement("option");
+  o.value = String(i);
+  o.textContent = STAMPS[i].text;
+  $("stampSel").appendChild(o);
+}
+$("stampSel").onchange = (e) => setStamp(+e.target.value);
 $("stampSize").oninput = (e) => {
   stamp.pct = +e.target.value;
   processedDirty = true;
@@ -804,6 +848,7 @@ async function ensureProcessed() {
     const PMAX = 2000;
     const r = Math.min(1, PMAX / Math.max(iw, ih));
     const w = Math.max(1, Math.round(iw * r)), h = Math.max(1, Math.round(ih * r));
+    if (stamp.idx >= 0) await ensureStampFont();
     const { srcData, maskData } = getSrcAndMask(w, h);
     const out = processTrick(srcData, maskData, w, h);
     bakeStamp(out, w, h, w / iw);
@@ -1026,6 +1071,7 @@ async function exportPNG() {
     const maxSide = Math.max(iw, ih);
     const es = 3072 / maxSide;
     const ew = Math.max(1, Math.round(iw * es)), eh = Math.max(1, Math.round(ih * es));
+    if (stamp.idx >= 0) await ensureStampFont();
     const { srcData, maskData } = getSrcAndMask(ew, eh);
     const out = processTrick(srcData, maskData, ew, eh);
     bakeStamp(out, ew, eh, ew / iw);
