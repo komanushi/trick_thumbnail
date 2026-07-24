@@ -110,7 +110,7 @@
 <body>
 <header>
   <h1>透過サムネトリックメーカー</h1>
-  <span class="sub">ブラシでなぞった部分だけサムネイルに見え、クリック(拡大表示)で全体が現れる透過PNGを作ります</span>
+  <span class="sub">ブラシでなぞった部分だけサムネイルに見え、開くと全体が現れる透過PNGを作ります(PC: クリック拡大 / モバイル: 画像長押し)</span>
   <button id="helpBtn" style="margin-left:auto">使い方</button>
 </header>
 
@@ -140,7 +140,7 @@
     <span class="label">表示</span>
     <button id="modeEdit" class="active">編集</button>
     <button id="modeThumb">サムネ(TL)</button>
-    <button id="modeFull">クリック後</button>
+    <button id="modeFull">開いたとき</button>
     <span id="thumbBgGroup" class="hidden">
       <button id="bgLight" class="active" title="ライトテーマのTL">白</button>
       <button id="bgDim" title="ダークブルーのTL">Dim</button>
@@ -153,12 +153,7 @@
     <button id="zoom100Btn">100%</button>
   </div>
 
-  <div class="group" style="margin-left:auto" title="クリック後の復元をどちらの環境に合わせるか。Xモバイルアプリは拡大表示で隠し部分がPCの2倍の明るさで表示されるため(実測)、両立できず基準を選びます。サムネの隠れ方はどちらも同じです">
-    <span class="label">クリック後の基準</span>
-    <button id="targetPC" class="active">PC</button>
-    <button id="targetMobile">モバイル</button>
-  </div>
-  <div class="group" id="photoModeGroup" title="PC基準専用: 画像全体にトーン圧縮をかけ、隠し部分の明るさクリップ(=クリック後の継ぎ目)を無くします。全体が少し暗くなります。モバイル基準はクリップ自体が無いため不要です">
+  <div class="group" id="photoModeGroup" style="margin-left:auto" title="画像全体にトーン圧縮をかけ、隠し部分の明るさクリップ(=開いたときの継ぎ目)を無くします。全体が少し暗くなります">
     <label class="label" style="cursor:pointer; user-select:none">
       <input type="checkbox" id="photoMode"> 写真モード(クリップ回避)
     </label>
@@ -190,7 +185,7 @@
   <ul>
     <li>画像を読み込む(最初は全体が「隠す」状態)</li>
     <li>サムネイルで見せたい部分をブラシでなぞる(赤いベールが消えた所が見える部分)</li>
-    <li>「サムネ(TL)」「クリック後」タブで見え方を確認</li>
+    <li>「サムネ(TL)」「開いたとき」タブで見え方を確認</li>
     <li>「PNGを書き出す」で保存し、そのままXに投稿</li>
   </ul>
   <h2>仕組みと注意</h2>
@@ -198,9 +193,9 @@
     <li>隠し部分は1px市松模様の透過+明度2倍で符号化。クリック後の黒背景で平均されて元の色に復元されます</li>
     <li>X はサムネ生成時に半透明ピクセルを完全透過に落とすため、隠し部分はライト/ダークどちらのテーマでも見えません</li>
     <li>X が確実に PNG のまま保持する PNG-8 (256色) で書き出します</li>
-    <li>サムネで確実に隠すには長辺2048px超が必須(それ以下だとXモバイルアプリのサムネで市松が縞状に漏れます。PCは正常)。書き出し時に自動で長辺3072pxに拡大するので意識は不要です</li>
-    <li>クリック後の見え方はPCブラウザ(色÷2)とXモバイルアプリ(色そのまま)で2倍異なり両立できません。「クリック後の基準」で合わせる環境を選んでください</li>
-    <li>PC基準では明るい色(RGB128以上)の隠し部分が頭打ちで暗くなるため、写真では「写真モード」を併用。モバイル基準はクリップ自体が無く写真モード不要です</li>
+    <li>サムネで確実に隠すには長辺2048px超が必須。書き出し時に自動で長辺3072pxに拡大するので意識は不要です</li>
+    <li><strong>復元して見る操作は環境で異なります(2026年7月のX仕様変更後):</strong> PCブラウザはクリックの拡大表示、モバイルアプリは<strong>画像の長押しプレビュー</strong>で復元されます。モバイルでタップ拡大すると隠し部分は黒く抜けて見えません(縮小画像しか表示されないため)</li>
+    <li>明るい色(RGB128以上)の隠し部分は頭打ちで暗くなるため、写真では「写真モード」を併用してください</li>
     <li>見せる部分の輪郭には白っぽいフチが出ます(実際に流行している画像と同じ現象です)</li>
   </ul>
 </div>
@@ -226,7 +221,6 @@ let thumbBg = "#ffffff";
 let tool = "brush";        // brush | erase
 let brushSize = 80;
 let photoMode = false;     // 全体トーン圧縮でクリップ回避
-let clickTarget = "pc";    // クリック後の復元基準 pc | mobile
 
 // ビュー変換 (画像座標 -> 画面CSS座標)
 let scale = 1, tx = 0, ty = 0;
@@ -554,28 +548,6 @@ function setBrushSize(v) {
   requestRender();
 }
 $("sizeRange").oninput = (e) => setBrushSize(+e.target.value);
-for (const [id, target] of [["targetPC", "pc"], ["targetMobile", "mobile"]]) {
-  $(id).onclick = async () => {
-    clickTarget = target;
-    $("targetPC").classList.toggle("active", target === "pc");
-    $("targetMobile").classList.toggle("active", target === "mobile");
-    // 写真モードはPC基準専用(モバイル基準=倍率1.0はクリップ自体が無い)
-    const pm = $("photoMode");
-    if (target === "mobile") {
-      if (pm.checked) { pm.checked = false; photoMode = false; }
-      pm.disabled = true;
-      $("photoModeGroup").style.opacity = ".45";
-    } else {
-      pm.disabled = false;
-      $("photoModeGroup").style.opacity = "";
-    }
-    processedDirty = true;
-    if (mode !== "edit" && img) { await ensureProcessed(); requestRender(); }
-    status(target === "mobile"
-      ? "モバイル基準: Xアプリのクリック後で完全復元(クリップなし・写真モード不要)。PCでは隠し部分が半分の暗さに見えます(「クリック後」プレビューはPC相当)"
-      : "PC基準: PCブラウザのクリック後で正確に復元。Xモバイルアプリでは隠し部分が2倍明るく見えます");
-  };
-}
 $("photoMode").onchange = async (e) => {
   photoMode = e.target.checked;
   processedDirty = true;
@@ -596,7 +568,7 @@ async function setMode(m) {
   if (m !== "edit" && img) {
     await ensureProcessed();
     if (m === "thumb") status("TLサムネの見え方を再現(縮小+半透明ピクセル除去)。ダークテーマでも隠し部分は見えません");
-    else status("クリック(拡大表示)後の見え方。黒背景で市松模様が元の色に見えます");
+    else status("開いたときの見え方(PC: クリック拡大 / モバイル: 画像長押し)。黒背景で市松模様が元の色に見えます");
   } else if (img) {
     status("赤いベール = サムネで隠れる部分。ブラシでなぞって見せる部分を指定");
   }
@@ -640,13 +612,13 @@ function processTrick(srcData, maskData, w, h) {
       const r = s[i], g = s[i + 1], b = s[i + 2], a = s[i + 3];
       const vis = m[i + 3] / 255; // 1=見せる
       if (a === 0) continue; // 元から透明
-      const pHidden = 0.5; // 透過率(サムネで消える性質)は基準によらず常に50%
-      // 隠し部分の色倍率(実機キャリブレーションで測定済み):
-      // ・PCブラウザは市松(または2048px超でサーバーが焼き込んだ半透明)を合成して
-      //   「色÷2」で表示するため 2.0倍。2048px以下ならモバイルアプリも同じ。
-      // ・2048px超の画像のみ、モバイルアプリは拡大ビューでアルファを無視して
-      //   不透明描画するため「色がそのまま」出る → 1.0倍(=持ち上げ不要、クリップなし)
-      const gainInv = clickTarget === "mobile" ? 1.0 : 0.5;
+      const pHidden = 0.5; // 透過率(サムネで消える性質)は常に50%
+      // 隠し部分の色倍率(2026-07 実機キャリブレーションで測定済み):
+      // フル解像度を表示する経路(PCのクリック拡大、モバイルの画像長押しプレビュー)は
+      // どちらも市松を正しくアルファ合成して「色÷2」で表示するため 2.0倍。
+      // モバイルのタップ拡大は縮小変種しか表示せず市松が2値化で全滅するため、
+      // 隠し部分は黒抜けになる(どの倍率でも復元不能。長押しが唯一の復元経路)。
+      const gainInv = 0.5;
       const p = (vis + (1 - vis) * pHidden) * (a / 255);
       if (p >= 0.998) {
         o[i] = r; o[i + 1] = g; o[i + 2] = b; o[i + 3] = 255;
@@ -922,9 +894,9 @@ async function exportPNG() {
   showBusy("トリック加工中…");
   await nextFrame();
   try {
-    // 長辺2048px以下だと、Xモバイルアプリのサムネイルで市松がクライアント
-    // 縮小されて縞状に漏れる(実測。PCのサムネ・クリック後は正常)。
-    // 書き出しは常に長辺2048px超(小さい画像は3072pxへ自動拡大)にする。
+    // 長辺2048px超で書き出すと、TL等はサーバー縮小変種(市松が2値化で消える)、
+    // 復元経路(PCクリック/モバイル長押し)はフル解像度を表示する構図が保証される。
+    // 2048px以下は変種の作られ方が異なり漏れの実績があるため常に3072pxへ自動拡大。
     const maxSide = Math.max(iw, ih);
     const es = maxSide <= 2048 ? 3072 / maxSide : Math.min(1, 4096 / maxSide);
     const ew = Math.max(1, Math.round(iw * es)), eh = Math.max(1, Math.round(ih * es));
