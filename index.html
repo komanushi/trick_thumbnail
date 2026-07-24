@@ -143,6 +143,7 @@
     <button id="fillBtn">全部見せる</button>
     <button id="invertBtn" title="I">反転</button>
     <button id="autoBtn" title="AI(RMBG-1.4)が被写体を検出して「見せる」に設定します。初回は約44MBのモデルをダウンロードします">AI自動選択</button>
+    <button id="autoRegionBtn" title="ドラッグで指定した範囲の中の被写体だけをAIで「見せる」に設定します。複数の被写体から選びたいときに">AI範囲選択</button>
   </div>
 
   <div class="group">
@@ -207,7 +208,7 @@
   <h2>作り方</h2>
   <ul>
     <li>画像を読み込む(最初は全体が「隠す」状態)</li>
-    <li>サムネイルで見せたい部分をブラシでなぞる(赤いベールが消えた所が見える部分)。「AI自動選択」で被写体を自動で選ぶこともできます(初回は約44MBのモデルをダウンロード)</li>
+    <li>サムネイルで見せたい部分をブラシでなぞる(赤いベールが消えた所が見える部分)。「AI自動選択」で被写体を自動で選ぶこともできます(初回は約44MBのモデルをダウンロード)。複数の被写体から選びたいときは「AI範囲選択」でドラッグ指定した範囲だけを対象にできます</li>
     <li>「サムネ(TL)」「開いたとき」タブで見え方を確認</li>
     <li>「スタンプ」で「長押しでみてね」の案内を焼き込めます(編集画面でドラッグして移動)</li>
     <li>「PNGを書き出す」で保存し、そのままXに投稿</li>
@@ -415,6 +416,16 @@ function render() {
     vctx.drawImage(img, 0, 0);
     vctx.drawImage(veilCanvas, 0, 0);
     drawStamp(vctx, 1);
+    if (regionRect) {
+      // AI範囲選択のマーキー(画像座標系。線幅はズームに依らず一定に見せる)
+      vctx.strokeStyle = "#4f8cff";
+      vctx.lineWidth = 2 / scale;
+      vctx.setLineDash([8 / scale, 6 / scale]);
+      vctx.strokeRect(
+        Math.min(regionRect.x0, regionRect.x1), Math.min(regionRect.y0, regionRect.y1),
+        Math.abs(regionRect.x1 - regionRect.x0), Math.abs(regionRect.y1 - regionRect.y0));
+      vctx.setLineDash([]);
+    }
   } else if (mode === "thumb" && thumbSimCanvas) {
     vctx.drawImage(thumbSimCanvas, 0, 0, iw, ih);
   } else if (processedCanvas) {
@@ -619,6 +630,11 @@ view.addEventListener("pointerdown", (e) => {
     view.classList.add("grabbing");
   } else if (e.button === 0) {
     const p = toImagePt(...screenXY(e));
+    if (regionArming) {
+      regionDragging = true;
+      regionRect = { x0: p.x, y0: p.y, x1: p.x, y1: p.y };
+      return;
+    }
     if (stamp.idx >= 0 && stampBox &&
         p.x >= stampBox.x0 && p.x <= stampBox.x1 && p.y >= stampBox.y0 && p.y <= stampBox.y1) {
       stampDragging = true;
@@ -639,7 +655,10 @@ function screenXY(e) {
 view.addEventListener("pointermove", (e) => {
   const [sx, sy] = screenXY(e);
   pointerScreen = { x: sx, y: sy };
-  if (stampDragging) {
+  if (regionDragging && regionRect) {
+    const p = toImagePt(sx, sy);
+    regionRect.x1 = p.x; regionRect.y1 = p.y;
+  } else if (stampDragging) {
     const p = toImagePt(sx, sy);
     stamp.x = p.x + stampDragOff.x;
     stamp.y = p.y + stampDragOff.y;
@@ -661,6 +680,16 @@ view.addEventListener("pointermove", (e) => {
   requestRender();
 });
 function endPointer(e) {
+  if (regionDragging && regionRect) {
+    const r = {
+      x: Math.min(regionRect.x0, regionRect.x1),
+      y: Math.min(regionRect.y0, regionRect.y1),
+      w: Math.abs(regionRect.x1 - regionRect.x0),
+      h: Math.abs(regionRect.y1 - regionRect.y0),
+    };
+    cancelRegionSelect();
+    if (r.w >= 8 && r.h >= 8) autoSelect(r);
+  }
   stampDragging = false; stampDragOff = null;
   drawing = false; panning = false; lastImgPt = null; lastScreenPt = null;
   view.classList.remove("grabbing");
@@ -687,6 +716,7 @@ window.addEventListener("keydown", (e) => {
     if (ae && ae !== document.body && ae.blur) ae.blur();
     spaceHeld = true; e.preventDefault();
   }
+  if (e.key === "Escape" && (regionArming || regionDragging)) cancelRegionSelect();
   if (e.key === "b" || e.key === "B") setTool("brush");
   if (e.key === "e" || e.key === "E") setTool("erase");
   if (e.key === "i" || e.key === "I") invertMask();
@@ -774,6 +804,7 @@ function updateButtons() {
   $("redoBtn").disabled = !redoStack.length;
   $("exportBtn").disabled = !img;
   $("autoBtn").disabled = !img;
+  $("autoRegionBtn").disabled = !img;
 }
 updateButtons();
 
@@ -818,28 +849,43 @@ function getRmbg(onProgress) {
   return rmbgPromise;
 }
 
-async function autoSelect() {
+// region を渡すとその範囲だけをモデルに入力し、範囲内のマスクだけを書き換える。
+// モデルは「入力画像内の主要被写体」を抜くため、範囲を狭めることが対象指定になる
+async function autoSelect(region) {
   if (!img) return;
+  const rx = region ? Math.max(0, Math.round(region.x)) : 0;
+  const ry = region ? Math.max(0, Math.round(region.y)) : 0;
+  const rw = region ? Math.min(iw - rx, Math.round(region.w)) : iw;
+  const rh = region ? Math.min(ih - ry, Math.round(region.h)) : ih;
+  if (rw < 8 || rh < 8) { status("範囲が小さすぎます"); return; }
   const setMsg = (m) => { $("busyMsg").textContent = m; };
   showBusy("AIモデル準備中…(初回は約44MBをダウンロードします)");
   try {
     const { model, processor, RawImage } = await getRmbg(setMsg);
     setMsg("被写体を解析中…(数十秒かかることがあります)");
     await nextFrame();
-    const image = await RawImage.fromURL(img.toDataURL());
+    let srcCanvas = img;
+    if (region) {
+      srcCanvas = document.createElement("canvas");
+      srcCanvas.width = rw; srcCanvas.height = rh;
+      srcCanvas.getContext("2d").drawImage(img, rx, ry, rw, rh, 0, 0, rw, rh);
+    }
+    const image = await RawImage.fromURL(srcCanvas.toDataURL());
     const { pixel_values } = await processor(image);
     const { output } = await model({ input: pixel_values });
-    const mask = await RawImage.fromTensor(output[0].mul(255).to("uint8")).resize(iw, ih);
+    const mask = await RawImage.fromTensor(output[0].mul(255).to("uint8")).resize(rw, rh);
     pushHistory();
-    const md = maskCtx.createImageData(iw, ih);
-    for (let i = 0; i < iw * ih; i++) {
+    const md = maskCtx.getImageData(rx, ry, rw, rh);
+    for (let i = 0; i < rw * rh; i++) {
       md.data[i * 4] = md.data[i * 4 + 1] = md.data[i * 4 + 2] = 255;
       md.data[i * 4 + 3] = mask.data[i];
     }
-    maskCtx.putImageData(md, 0, 0);
+    maskCtx.putImageData(md, rx, ry);
     markMaskChanged();
     updateButtons();
-    status("AIが被写体を「見せる」に設定しました。ブラシで微調整できます(戻すには Ctrl+Z)");
+    status(region
+      ? "範囲内の被写体を「見せる」に設定しました。ブラシで微調整できます(戻すには Ctrl+Z)"
+      : "AIが被写体を「見せる」に設定しました。ブラシで微調整できます(戻すには Ctrl+Z)");
   } catch (err) {
     console.error(err);
     status(`自動選択に失敗しました: ${err?.message || err}`);
@@ -847,7 +893,23 @@ async function autoSelect() {
     hideBusy();
   }
 }
-$("autoBtn").onclick = autoSelect;
+$("autoBtn").onclick = () => autoSelect();
+
+// 「AI範囲選択」: ボタンで武装し、編集画面のドラッグで矩形を指定して実行する
+let regionArming = false, regionDragging = false, regionRect = null;
+$("autoRegionBtn").onclick = () => {
+  if (!img) return;
+  regionArming = !regionArming;
+  regionRect = null;
+  $("autoRegionBtn").classList.toggle("active", regionArming);
+  status(regionArming ? "ドラッグで範囲を指定してください(Escで中止)" : "範囲選択を中止しました");
+  requestRender();
+};
+function cancelRegionSelect() {
+  regionArming = false; regionDragging = false; regionRect = null;
+  $("autoRegionBtn").classList.remove("active");
+  requestRender();
+}
 
 // ========================= トリック加工 =========================
 // 隠し部分: 1px点格子(被覆率25%)で透過し、不透明ピクセルは色を4倍(255でクリップ)。
