@@ -153,6 +153,15 @@
     <button id="zoom100Btn">100%</button>
   </div>
 
+  <div class="group" id="stampGroup" title="「長押しで見てね」を伝えるスタンプを画像に焼き込みます。TLでも開いたときでも見えます。編集画面でドラッグして位置を調整">
+    <span class="label">スタンプ</span>
+    <button id="stampNone" class="active">なし</button>
+    <button id="stamp0">Tap&Hold🥺</button>
+    <button id="stamp1">長押し👆</button>
+    <button id="stamp2">ぜんぶ🫣</button>
+    <span class="label">大きさ</span>
+    <input type="range" id="stampSize" min="2" max="9" value="4" step="0.5" style="width:70px">
+  </div>
   <div class="group" id="photoModeGroup" style="margin-left:auto" title="画像全体にトーン圧縮をかけ、隠し部分の明るさクリップ(=開いたときの継ぎ目)を無くします。全体がかなり暗くなります(暗い場所でご覧ください)">
     <label class="label" style="cursor:pointer; user-select:none">
       <input type="checkbox" id="photoMode"> 写真モード(クリップ回避)
@@ -187,6 +196,7 @@
     <li>画像を読み込む(最初は全体が「隠す」状態)</li>
     <li>サムネイルで見せたい部分をブラシでなぞる(赤いベールが消えた所が見える部分)</li>
     <li>「サムネ(TL)」「開いたとき」タブで見え方を確認</li>
+    <li>「スタンプ」で「長押しでみてね」の案内を焼き込めます(編集画面でドラッグして移動)</li>
     <li>「PNGを書き出す」で保存し、そのままXに投稿</li>
   </ul>
   <h2>仕組みと注意</h2>
@@ -222,6 +232,16 @@ let thumbBg = "#ffffff";
 let tool = "brush";        // brush | erase
 let brushSize = 80;
 let photoMode = false;     // 全体トーン圧縮でクリップ回避
+
+// 「長押しで見てね」スタンプ。完全不透明で焼き込むのでTLでも開いたときでも見える
+const STAMPS = [
+  { text: "Tap & Hold Please 🥺", bg: "#ffffff", border: "#ff9ec6", fg: "#ff6fa5" },
+  { text: "👆 長押しでみてね", bg: "#ffd9e8", border: "#ffffff", fg: "#d84a7f" },
+  { text: "長押しで全部見えるよ 🫣", bg: "#fff3c4", border: "#ffffff", fg: "#b8860b" },
+];
+let stamp = { idx: -1, x: 0, y: 0, pct: 4, angle: -6 * Math.PI / 180 };
+let stampBox = null;       // 編集ビューでのドラッグ判定用(画像座標のAABB)
+let stampDragging = false, stampDragOff = null;
 
 // ビュー変換 (画像座標 -> 画面CSS座標)
 let scale = 1, tx = 0, ty = 0;
@@ -275,6 +295,8 @@ function setImage(bmp) {
   veilCtx = veilCanvas.getContext("2d");
 
   undoStack = []; redoStack = [];
+  stamp.x = 0; stamp.y = 0; stampBox = null;
+  if (stamp.idx >= 0) { stamp.x = iw * 0.5; stamp.y = ih * 0.85; }
   processedDirty = true;
   updateVeil();
   setMode("edit");
@@ -361,6 +383,7 @@ function render() {
   if (mode === "edit") {
     vctx.drawImage(img, 0, 0);
     vctx.drawImage(veilCanvas, 0, 0);
+    drawStamp(vctx, 1);
   } else if (mode === "thumb" && thumbSimCanvas) {
     vctx.drawImage(thumbSimCanvas, 0, 0, iw, ih);
   } else if (processedCanvas) {
@@ -384,6 +407,90 @@ function render() {
   }
   $("zoomInfo").textContent = img ? `ズーム ${(scale * 100).toFixed(0)}%` : "";
 }
+
+// ========================= スタンプ =========================
+// r: 画像座標(iw,ih)に対する描画先の倍率。吹き出しピル + しっぽの丸2つ。
+function drawStamp(ctx, r) {
+  if (stamp.idx < 0) return;
+  const s = STAMPS[stamp.idx];
+  const fs = (stamp.pct / 100) * iw * r;
+  ctx.save();
+  ctx.translate(stamp.x * r, stamp.y * r);
+  ctx.rotate(stamp.angle);
+  ctx.font = `bold ${fs}px "Hiragino Maru Gothic ProN", "Yu Gothic UI", "Noto Sans JP", sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  const tw = ctx.measureText(s.text).width;
+  const pw = tw + fs * 1.2, ph = fs * 1.9, rad = ph / 2;
+  const bw = fs * 0.22; // 縁取りの太さ
+  ctx.beginPath();
+  ctx.roundRect(-pw / 2, -ph / 2, pw, ph, rad);
+  ctx.fillStyle = s.bg;
+  ctx.strokeStyle = s.border;
+  ctx.lineWidth = bw;
+  ctx.fill();
+  ctx.stroke();
+  // しっぽ(左下に小さな丸2つ)
+  for (const [dx, dy, cr] of [[-pw * 0.32, ph * 0.72, fs * 0.22], [-pw * 0.40, ph * 1.02, fs * 0.13]]) {
+    ctx.beginPath();
+    ctx.arc(dx, dy, cr, 0, Math.PI * 2);
+    ctx.fillStyle = s.bg;
+    ctx.strokeStyle = s.border;
+    ctx.lineWidth = bw * 0.8;
+    ctx.fill();
+    ctx.stroke();
+  }
+  ctx.fillStyle = s.fg;
+  ctx.fillText(s.text, 0, fs * 0.06);
+  ctx.restore();
+  if (r === 1) {
+    // ドラッグ判定用AABB(回転ぶんを対角で概算)
+    const hw = (pw / 2 + bw) * Math.cos(stamp.angle) + (ph / 2 + bw) * Math.abs(Math.sin(stamp.angle));
+    const hh = (ph / 2 + bw) * Math.cos(stamp.angle) + (pw / 2 + bw) * Math.abs(Math.sin(stamp.angle));
+    stampBox = { x0: stamp.x - hw, y0: stamp.y - hh - ph * 0.2, x1: stamp.x + hw, y1: stamp.y + hh + ph * 0.6 };
+  }
+}
+
+// 加工結果(ImageData)にスタンプを完全不透明で焼き込む。
+// キャンバスのアンチエイリアスは半透明画素を作り、PNG-8では透過に落ちて
+// フチが欠けるため、アルファ128以上の画素だけを不透明として採用する。
+function bakeStamp(out, w, h, r) {
+  if (stamp.idx < 0) return;
+  const sc = document.createElement("canvas");
+  sc.width = w; sc.height = h;
+  const sx = sc.getContext("2d", { willReadFrequently: true });
+  drawStamp(sx, r);
+  const sd = sx.getImageData(0, 0, w, h).data;
+  const od = out.data;
+  for (let i = 0; i < od.length; i += 4) {
+    if (sd[i + 3] >= 128) {
+      od[i] = sd[i]; od[i + 1] = sd[i + 1]; od[i + 2] = sd[i + 2]; od[i + 3] = 255;
+    }
+  }
+}
+
+function setStamp(idx) {
+  stamp.idx = idx;
+  $("stampNone").classList.toggle("active", idx < 0);
+  for (let i = 0; i < STAMPS.length; i++) $(`stamp${i}`).classList.toggle("active", idx === i);
+  if (idx >= 0 && img && stamp.x === 0 && stamp.y === 0) {
+    stamp.x = iw * 0.5; stamp.y = ih * 0.85; // 初期位置は下中央
+  }
+  processedDirty = true;
+  if (mode !== "edit" && img) { ensureProcessed().then(requestRender); }
+  status(idx < 0 ? "スタンプなし" : `スタンプ「${STAMPS[idx].text}」: 編集画面でドラッグして位置を調整できます`);
+  requestRender();
+}
+$("stampNone").onclick = () => setStamp(-1);
+for (let i = 0; i < STAMPS.length; i++) $(`stamp${i}`).onclick = () => setStamp(i);
+$("stampSize").oninput = (e) => {
+  stamp.pct = +e.target.value;
+  processedDirty = true;
+  requestRender();
+};
+$("stampSize").onchange = async () => {
+  if (mode !== "edit" && img) { await ensureProcessed(); requestRender(); }
+};
 
 function updateVeil() {
   veilCtx.globalCompositeOperation = "source-over";
@@ -458,9 +565,15 @@ view.addEventListener("pointerdown", (e) => {
     lastScreenPt = { x: e.clientX, y: e.clientY };
     view.classList.add("grabbing");
   } else if (e.button === 0) {
+    const p = toImagePt(...screenXY(e));
+    if (stamp.idx >= 0 && stampBox &&
+        p.x >= stampBox.x0 && p.x <= stampBox.x1 && p.y >= stampBox.y0 && p.y <= stampBox.y1) {
+      stampDragging = true;
+      stampDragOff = { x: stamp.x - p.x, y: stamp.y - p.y };
+      return;
+    }
     drawing = true;
     pushHistory();
-    const p = toImagePt(...screenXY(e));
     lastImgPt = p;
     strokeSegment(p, p);
     markMaskChanged();
@@ -473,7 +586,12 @@ function screenXY(e) {
 view.addEventListener("pointermove", (e) => {
   const [sx, sy] = screenXY(e);
   pointerScreen = { x: sx, y: sy };
-  if (panning && lastScreenPt) {
+  if (stampDragging) {
+    const p = toImagePt(sx, sy);
+    stamp.x = p.x + stampDragOff.x;
+    stamp.y = p.y + stampDragOff.y;
+    processedDirty = true;
+  } else if (panning && lastScreenPt) {
     tx += e.clientX - lastScreenPt.x;
     ty += e.clientY - lastScreenPt.y;
     lastScreenPt = { x: e.clientX, y: e.clientY };
@@ -490,6 +608,7 @@ view.addEventListener("pointermove", (e) => {
   requestRender();
 });
 function endPointer(e) {
+  stampDragging = false; stampDragOff = null;
   drawing = false; panning = false; lastImgPt = null; lastScreenPt = null;
   view.classList.remove("grabbing");
   requestRender();
@@ -687,6 +806,7 @@ async function ensureProcessed() {
     const w = Math.max(1, Math.round(iw * r)), h = Math.max(1, Math.round(ih * r));
     const { srcData, maskData } = getSrcAndMask(w, h);
     const out = processTrick(srcData, maskData, w, h);
+    bakeStamp(out, w, h, w / iw);
     processedCanvas = document.createElement("canvas");
     processedCanvas.width = w; processedCanvas.height = h;
     processedCanvas.getContext("2d").putImageData(out, 0, 0);
@@ -908,6 +1028,7 @@ async function exportPNG() {
     const ew = Math.max(1, Math.round(iw * es)), eh = Math.max(1, Math.round(ih * es));
     const { srcData, maskData } = getSrcAndMask(ew, eh);
     const out = processTrick(srcData, maskData, ew, eh);
+    bakeStamp(out, ew, eh, ew / iw);
     let bytes;
     if (typeof CompressionStream !== "undefined") {
       showBusy("PNG-8 に変換中…");
@@ -950,7 +1071,7 @@ const APP_VERSION = "__VERSION__";
 $("version").textContent = APP_VERSION.startsWith("__") ? "dev" : `v ${APP_VERSION}`;
 
 // テスト用フック
-window.__test = { processTrick, encodePNG8, medianCut, setImageForTest: (canvas) => setImage(canvas), getState: () => ({ iw, ih, img, maskCanvas, maskCtx }) };
+window.__test = { processTrick, encodePNG8, medianCut, bakeStamp, setImageForTest: (canvas) => setImage(canvas), getState: () => ({ iw, ih, img, maskCanvas, maskCtx, stamp, processedCanvas, thumbSimCanvas }) };
 </script>
 </body>
 </html>
