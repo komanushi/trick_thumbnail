@@ -25,6 +25,10 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v7
+      - name: バージョン番号を埋め込む(コミットSHA + JSTの日時)
+        run: |
+          VERSION="$(git rev-parse --short HEAD) $(TZ=Asia/Tokyo date +'%Y-%m-%d %H:%M')"
+          sed -i "s/__VERSION__/${VERSION}/" index.html
       - uses: actions/configure-pages@v6
       - uses: actions/upload-pages-artifact@v5
         with:
