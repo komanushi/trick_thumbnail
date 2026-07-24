@@ -142,6 +142,7 @@
     <button id="clearBtn">全部隠す</button>
     <button id="fillBtn">全部見せる</button>
     <button id="invertBtn" title="I">反転</button>
+    <button id="autoBtn" title="AI(RMBG-1.4)が被写体を検出して「見せる」に設定します。初回は約44MBのモデルをダウンロードします">AI自動選択</button>
   </div>
 
   <div class="group">
@@ -206,7 +207,7 @@
   <h2>作り方</h2>
   <ul>
     <li>画像を読み込む(最初は全体が「隠す」状態)</li>
-    <li>サムネイルで見せたい部分をブラシでなぞる(赤いベールが消えた所が見える部分)</li>
+    <li>サムネイルで見せたい部分をブラシでなぞる(赤いベールが消えた所が見える部分)。「AI自動選択」で被写体を自動で選ぶこともできます(初回は約44MBのモデルをダウンロード)</li>
     <li>「サムネ(TL)」「開いたとき」タブで見え方を確認</li>
     <li>「スタンプ」で「長押しでみてね」の案内を焼き込めます(編集画面でドラッグして移動)</li>
     <li>「PNGを書き出す」で保存し、そのままXに投稿</li>
@@ -772,8 +773,81 @@ function updateButtons() {
   $("undoBtn").disabled = !undoStack.length;
   $("redoBtn").disabled = !redoStack.length;
   $("exportBtn").disabled = !img;
+  $("autoBtn").disabled = !img;
 }
 updateButtons();
+
+// ========================= AI自動選択 (RMBG-1.4) =========================
+// front_thumbnail_gen と同じ構成: transformers.js + briaai/RMBG-1.4(量子化q8、
+// 約44MB、ブラウザ内WASM実行)。CDNから遅延ロードし、被写体のアルファマップを
+// 「見せる」マスクとしてソフトエッジのまま書き込む。
+let rmbgPromise = null;
+function getRmbg(onProgress) {
+  if (!rmbgPromise) {
+    rmbgPromise = (async () => {
+      const { AutoModel, AutoProcessor, RawImage } =
+        await import("https://cdn.jsdelivr.net/npm/@huggingface/transformers@3");
+      const model = await AutoModel.from_pretrained("briaai/RMBG-1.4", {
+        config: { model_type: "custom" },
+        dtype: "q8",
+        progress_callback: (p) => {
+          if (p.status === "progress" && p.file?.endsWith(".onnx")) {
+            onProgress?.(`モデル取得中 ${Math.round(p.progress ?? 0)}%`);
+          }
+        },
+      });
+      const processor = await AutoProcessor.from_pretrained("briaai/RMBG-1.4", {
+        config: {
+          do_normalize: true,
+          do_pad: false,
+          do_rescale: true,
+          do_resize: true,
+          image_mean: [0.5, 0.5, 0.5],
+          feature_extractor_type: "ImageFeatureExtractor",
+          image_std: [1, 1, 1],
+          resample: 2,
+          rescale_factor: 0.00392156862745098,
+          size: { width: 1024, height: 1024 },
+        },
+      });
+      return { model, processor, RawImage };
+    })();
+    // ロード失敗時は次回クリックで再試行できるようにする
+    rmbgPromise.catch(() => { rmbgPromise = null; });
+  }
+  return rmbgPromise;
+}
+
+async function autoSelect() {
+  if (!img) return;
+  const setMsg = (m) => { $("busyMsg").textContent = m; };
+  showBusy("AIモデル準備中…(初回は約44MBをダウンロードします)");
+  try {
+    const { model, processor, RawImage } = await getRmbg(setMsg);
+    setMsg("被写体を解析中…(数十秒かかることがあります)");
+    await nextFrame();
+    const image = await RawImage.fromURL(img.toDataURL());
+    const { pixel_values } = await processor(image);
+    const { output } = await model({ input: pixel_values });
+    const mask = await RawImage.fromTensor(output[0].mul(255).to("uint8")).resize(iw, ih);
+    pushHistory();
+    const md = maskCtx.createImageData(iw, ih);
+    for (let i = 0; i < iw * ih; i++) {
+      md.data[i * 4] = md.data[i * 4 + 1] = md.data[i * 4 + 2] = 255;
+      md.data[i * 4 + 3] = mask.data[i];
+    }
+    maskCtx.putImageData(md, 0, 0);
+    markMaskChanged();
+    updateButtons();
+    status("AIが被写体を「見せる」に設定しました。ブラシで微調整できます(戻すには Ctrl+Z)");
+  } catch (err) {
+    console.error(err);
+    status(`自動選択に失敗しました: ${err?.message || err}`);
+  } finally {
+    hideBusy();
+  }
+}
+$("autoBtn").onclick = autoSelect;
 
 // ========================= トリック加工 =========================
 // 隠し部分: 1px点格子(被覆率25%)で透過し、不透明ピクセルは色を4倍(255でクリップ)。
